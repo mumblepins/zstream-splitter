@@ -1,0 +1,6 @@
+zstream-splitter (0.1.0) UNRELEASED; urgency=low
+
+  * Initial release. Closes: #nnnn
+    <nnnn is the bug number of your ITP>
+
+ -- Daniel Sullivan <mumblepins@gmail.com>  Thu, 02 Aug 2018 16:29:58 -0500
