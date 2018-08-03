@@ -1,4 +1,11 @@
 ## zstream-splitter
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+**CAUTION: This might eat your data/backups. User beware.**
+
+---
+
 A program to take a zfs stream and split it into chunks. Modified from zstreamdump in the [zfsonlinux](https://github.com/zfsonlinux/zfs) archive.
 
 General intent was to make it easier to upload a zfs send backup to Google Drive. See zstream-split-gdrive for an example of uploading via `rclone`.
