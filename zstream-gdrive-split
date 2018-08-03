@@ -1,5 +1,5 @@
 #!/bin/bash
-# zstream-split-gdrive
+# zstream-gdrive-split
 #
 # Copyright (C) 2018 Daniel Sullivan <mumblepins@gmail.com>
 #
@@ -42,7 +42,7 @@ SPLIT_SIZE=""
 
 
 usage() {
-	echo "Usage: zstream-split-gdrive [-s <split_size>] [-h] dataset_name snapshot_name [send_to_format]"
+	echo "Usage: zstream-gdrive-split [-s <split_size>] [-h] dataset_name snapshot_name [send_to_format]"
 	echo "  -h              -- this help"
 	echo "  -s <split_size> -- specify approximate split points (pre-compression) (allows for extensions: k,M,G...)"
 	echo "  dataset_name    -- the name of the dataset to transfer"

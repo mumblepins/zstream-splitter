@@ -1,0 +1,74 @@
+#!/bin/bash
+# zstream-gdrive-retrieve
+#
+# Copyright (C) 2018 Daniel Sullivan <mumblepins@gmail.com>
+#
+# This software may be modified and distributed under the terms
+# of the MIT license.  See the LICENSE file for details.
+
+ncpu=${NCPUS:-$(nproc)}
+ncpu=${ncpu:-"1"}
+ZFS="sudo zfs"
+
+EXTRACT="7z e -si -so -txz -m0=lzma2 -mmt=$ncpu"
+COMPRESS_EXT="xz"
+PREBUFFER="pv -cterab -N Pre-Buffer"
+MBUFFER="mbuffer -m1G -q"
+POSTBUFFER="pv -cterab -N Post-Buffer"
+POSTEXTRACT="pv -cterab -N Post-Extract"
+
+SEND_TO_DEFAULT_FORMAT='drive:/rclone/$(hostname -s)/${SEND_FS}/${SEND_SNAP}'".%06d.${COMPRESS_EXT}"
+usage() {
+	echo "Usage: zstream-gdrive-retrieve [-h] drive_path receiving_dataset [send_to_format]"
+	echo "  -h                -- this help"
+	echo "  drive_path        -- the name of the dataset to transfer"
+	echo "  receiving_dataset -- dataset to receive stream into"
+}
+
+
+while getopts ":h:" opt; do
+	case ${opt} in
+		h )
+			usage
+			exit 0
+			;;
+		\? )
+			echo "Invalid Option: -$OPTARG" 1>&2
+			usage 1>&2
+			exit 1
+			;;
+	esac
+done
+
+shift $((OPTIND -1))
+DRIVE_PATH=$1; shift
+#SEND_SNAP=$1; shift
+RECEIVE_ZFS=$1; shift
+
+SEND_TO_DEFAULT_FORMAT=$(eval echo "${SEND_TO_DEFAULT_FORMAT}")
+SEND_TO_FORMAT=${1:-$SEND_TO_DEFAULT_FORMAT}
+
+if [[ -z "$DRIVE_PATH" ]] || [[ -z "$RECEIVE_ZFS" ]]; then
+	echo "Invalid number of arguments" 1>&2
+	usage 1>&2
+	exit 1
+fi
+
+
+BASEDIR="$(dirname ${DRIVE_PATH})"
+SNAP_NAME="$(basename ${DRIVE_PATH})"
+JQ_MATCHER='.[]|select(.IsDir == false)|select(.Name |test("^'"$SNAP_NAME"'.*'"$COMPRESS_EXT"'$")) | .Name'
+FILES=$(rclone lsjson ${BASEDIR} | \
+	jq -r "$JQ_MATCHER" )
+
+for FILE in ${FILES}; do
+	echo "Receiving ${BASEDIR}/${FILE}..."
+	rclone cat -v "${BASEDIR}/${FILE}" | \
+		${PREBUFFER} | \
+		${MBUFFER} | \
+		${POSTBUFFER} |\
+		${EXTRACT} | \
+		${POSTEXTRACT} | \
+		${ZFS} receive -Fsuv "$RECEIVE_ZFS"
+done
+#rclone lsjson drive:/rclone/mercury/rpool/var/log |jq -r '.[]|select(.IsDir == false)|.Name'

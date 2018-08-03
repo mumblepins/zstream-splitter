@@ -73,4 +73,5 @@ TARGET_LINK_LIBRARIES(zstream-splitter
 install(TARGETS zstream-splitter
         RUNTIME DESTINATION bin)
 
-install(PROGRAMS zstream-split-gdrive DESTINATION bin )
+install(PROGRAMS zstream-gdrive-retrieve DESTINATION bin )
+install(PROGRAMS zstream-gdrive-split DESTINATION bin )
