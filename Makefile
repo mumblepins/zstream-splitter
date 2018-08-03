@@ -1,22 +1,17 @@
 BUILDDIR = build
 ARTIFACTDIR = artifacts
-PROGRAMNAME = zstream_splitter
+PROGRAMNAME = zstream-splitter
 
-DEBBUILDDIR = ${BUILDDIR}/deb-build
-DEBDIR = ${ARTIFACTDIR}/deb
 
-ifndef DEBUILD_ARGS
-    DEBUILD_ARGS=-us -uc
-endif
 
-.PHONY: all makedirs build tgz clean
+.PHONY: all makedirs build package clean
 all: build
 
 clean:
 	rm -rf ${BUILDDIR}/
 
 makedirs:
-	mkdir -p ${BUILDDIR} ${ARTIFACTDIR} ${DEBBUILDDIR} ${DEBDIR}
+	mkdir -p ${BUILDDIR} ${ARTIFACTDIR}
 
 build: makedirs
 	cd ${BUILDDIR} &&\
@@ -24,12 +19,8 @@ build: makedirs
 	make
 	cp ${BUILDDIR}/${PROGRAMNAME} ${ARTIFACTDIR}/
 
-tgz: makedirs build
+package: makedirs build
 	cd ${BUILDDIR} &&\
 	make package
-	cp ${BUILDDIR}/*.tar.gz ${ARTIFACTDIR}/
-
-deb: clean makedirs
-	rsync -ax --exclude ${ARTIFACTDIR} --exclude ${BUILDDIR} ./ ${DEBBUILDDIR}/
-	cd ${DEBBUILDDIR} && debuild ${DEBUILD_ARGS}
-	cp ${BUILDDIR}/*.* ${DEBDIR}/
+	cp ${BUILDDIR}/${PROGRAMNAME}*.deb ${ARTIFACTDIR}/
+	cp ${BUILDDIR}/${PROGRAMNAME}*.tar.gz ${ARTIFACTDIR}/

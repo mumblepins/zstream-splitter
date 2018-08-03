@@ -37,13 +37,12 @@
 
 
 static void usage(void) {
-    (void) fprintf(stderr, "usage: zstream_split [-h] [-b size] [-s size]\n");
+    (void) fprintf(stderr, "usage: zstream-splitter [-h] [-b size] [-s size]\n");
     (void) fprintf(stderr, "\t-h        -- show this help\n");
     (void) fprintf(stderr, "\t-b <size> -- specify a breakpoint in bytes, where <size> can be given in b,k,M,G\n");
     (void) fprintf(stderr,
                    "\t-s <size> -- specify amount already transferred in bytes, where <size> can be given in b,k,M,G\n");
     (void) fprintf(stderr, "\t-V        -- display version\n\n");
-
     (void) fprintf(stderr, "  Splits a stream from 'zfs send' and outputs the appropriate\n"
                            "  resume token. STDOUT and STDIN should not be terminals.");
     exit(1);
@@ -189,7 +188,7 @@ int main(int argc, char *argv[]) {
                 usage();
                 break;
             case 'V':
-                fprintf(stdout, "zstream_splitter v %s (gcc %s, %s)\n",
+                fprintf(stdout, "zstream-splitter v %s (gcc %s, %s)\n",
                         PROJECT_VERSION, __VERSION__, SYS_NAME_ARCH);
                 exit(0);
                 break;

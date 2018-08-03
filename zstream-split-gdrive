@@ -1,0 +1,144 @@
+#!/bin/bash
+# zstream-split-gdrive
+#
+# Copyright (C) 2018 Daniel Sullivan <mumblepins@gmail.com>
+#
+# This software may be modified and distributed under the terms
+# of the MIT license.  See the LICENSE file for details.
+
+ZSTREAM_SPLIT="zstream-splitter"
+ZFS="sudo zfs"
+ncpu=${NCPUS:-$(nproc)}
+ncpu=${ncpu:-"1"}
+COMPRESS="zstd -10 -T$ncpu "
+COMPRESS="7z a -txz -m0=lzma2 -mx=6 -mmt=$ncpu -bd -si -so -an"
+COMPRESS_EXT="zst"
+COMPRESS_EXT="xz"
+PRECOMP_BUFFER="pv -cterab -N Pre-compress"
+POSTCOMP_MBUFFER="mbuffer -m1G -q"
+POSTCOMP_PREMBUF="pv -cterab -N Post-com_pre-buffer"
+POSTCOMP_BUFFER="pv -cterab -N Post-buffer"
+INITIAL_SEND_ARGS="-pDcLe"
+
+DRIVE_CHUNK_SIZE=$((64 * 1024 * 1024)) # 64 MB
+
+
+TEMP_DIR="/tmp/.$USER"
+mkdir -p "$TEMP_DIR"
+
+TMPFILE="$(mktemp "$TEMP_DIR"/zstream_split.XXXXXX)"
+exec 4<>"$TMPFILE"
+
+SEND_FS="\$SEND_FS"
+SEND_SNAP="\$SEND_SNAP"
+OUTPUT_COMMAND_FORMAT="rclone rcat --drive-chunk-size ${DRIVE_CHUNK_SIZE} --low-level-retries 100 --retries 100 -vv "
+
+
+SEND_TO_DEFAULT_FORMAT='drive:/rclone/$(hostname -s)/${SEND_FS}/${SEND_SNAP}'".%06d.${COMPRESS_EXT}"
+
+
+SPLIT_SIZE=""
+
+
+
+usage() {
+	echo "Usage: zstream-split-gdrive [-s <split_size>] [-h] dataset_name snapshot_name [send_to_format]"
+	echo "  -h              -- this help"
+	echo "  -s <split_size> -- specify approximate split points (pre-compression) (allows for extensions: k,M,G...)"
+	echo "  dataset_name    -- the name of the dataset to transfer"
+	echo "  snapshot_name   -- snapshot to transfer"
+	echo "  send_to_format  -- optional, defaults to: '${SEND_TO_DEFAULT_FORMAT}'"
+	echo "                       requires a decimal fprint string, e.g. %04d"
+}
+
+while getopts ":hs:" opt; do
+	case ${opt} in
+		h )
+			usage
+			exit 0
+			;;
+		s )
+			SPLIT_SIZE="$OPTARG"
+			;;
+		\? )
+			echo "Invalid Option: -$OPTARG" 1>&2
+			usage 1>&2
+			exit 1
+			;;
+	esac
+done
+shift $((OPTIND -1))
+SEND_FS=$1; shift
+SEND_SNAP=$1; shift
+SEND_TO_DEFAULT_FORMAT=$(eval echo "${SEND_TO_DEFAULT_FORMAT}")
+SEND_TO_FORMAT=${1:-$SEND_TO_DEFAULT_FORMAT}
+
+if [[ -z "$SEND_FS" ]] || [[ -z "$SEND_SNAP" ]]; then
+	echo "Invalid number of arguments" 1>&2
+	usage 1>&2
+	exit 1
+fi
+if !(echo "$SEND_TO_FORMAT" | grep -q "%[0-9]*d"); then
+	echo "Invalid Format: '$SEND_TO_FORMAT'" 1>&2
+	usage 1>&2
+	exit 1
+fi
+
+if [[ "$SEND_TO_DEFAULT_FORMAT" != "$SEND_TO_FORMAT" ]]; then
+	echo "Using custom format: '$SEND_TO_FORMAT'"
+fi
+echo "$SEND_TO_FORMAT"
+
+
+get_bytes() {
+    sed -nr 's/^bytes:\s+(.*)$/\1/p' "$TMPFILE"
+}
+
+get_token() {
+    sed -nr 's/^receive_resume_token:\s+(.*)$/\1/p' "$TMPFILE"
+}
+
+process_tmpfile() {
+    token=$(get_token)
+    bytes=$(get_bytes)
+    exec 4>&-
+    exec 4<>"$TMPFILE"
+}
+
+get_output_command() {
+	OUT_FN=$(printf "$SEND_TO_FORMAT" $1)
+    OUTPUT_COMMAND="$OUTPUT_COMMAND_FORMAT $OUT_FN"
+    echo "Sending '$SEND_FS@$SEND_SNAP' -> $OUT_FN"
+}
+
+get_output_command 0
+${ZFS} send ${INITIAL_SEND_ARGS} ${SEND_FS}@${SEND_SNAP} | \
+    ( ${ZSTREAM_SPLIT}  -b${SPLIT_SIZE} 2>&4 ) | \
+    ${PRECOMP_BUFFER} | \
+    ${COMPRESS} | \
+    ${POSTCOMP_PREMBUF} | \
+    ${POSTCOMP_MBUFFER} | \
+    ${POSTCOMP_BUFFER} | \
+    ${OUTPUT_COMMAND}
+err=${PIPESTATUS[1]}
+N=1
+while [ ${err} -eq 10 ]; do
+	process_tmpfile
+    if [ ${bytes} -gt 0 ]; then
+        extra_args="-s $bytes"
+    fi
+    get_output_command ${N}
+    ${ZFS} send -et ${token} | \
+        ( ${ZSTREAM_SPLIT}  -b${SPLIT_SIZE} 2>&4 ) | \
+        ${PRECOMP_BUFFER} | \
+        ${COMPRESS} | \
+        ${POSTCOMP_PREMBUF} | \
+        ${POSTCOMP_MBUFFER} | \
+        ${POSTCOMP_BUFFER} | \
+        ${OUTPUT_COMMAND}
+    err=${PIPESTATUS[1]}
+    N=$(( N + 1 ))
+done
+
+exec 4>&-
+rm -rf ${TMPFILE}
