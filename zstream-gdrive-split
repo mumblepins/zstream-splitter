@@ -10,28 +10,32 @@ ZSTREAM_SPLIT="zstream-splitter"
 ZFS="sudo zfs"
 ncpu=${NCPUS:-$(nproc)}
 ncpu=${ncpu:-"1"}
-COMPRESS="zstd -10 -T$ncpu "
+#COMPRESS="zstd -10 -T$ncpu "
 COMPRESS="7z a -txz -m0=lzma2 -mx=6 -mmt=$ncpu -bd -si -so -an"
-COMPRESS_EXT="zst"
+#COMPRESS_EXT="zst"
 COMPRESS_EXT="xz"
+PV_HEIGHT=20
 PRECOMP_BUFFER="pv -cterab -N Pre-compress"
 POSTCOMP_MBUFFER="mbuffer -m1G -q"
 POSTCOMP_PREMBUF="pv -cterab -N Post-com_pre-buffer"
 POSTCOMP_BUFFER="pv -cterab -N Post-buffer"
+token_ext='.tokenlist.tsv'
 INITIAL_SEND_ARGS="-pDcLe"
 
 DRIVE_CHUNK_SIZE=$((64 * 1024 * 1024)) # 64 MB
 
 
-TEMP_DIR="/tmp/.$USER"
+TEMP_DIR="$(mktemp -t -d zstream_split.XXXXXX)"
+#echo $TEMP_DIR
 mkdir -p "$TEMP_DIR"
-
-TMPFILE="$(mktemp "$TEMP_DIR"/zstream_split.XXXXXX)"
+TMPFILE="$TEMP_DIR/track_file"
 exec 4<>"$TMPFILE"
 
 SEND_FS="\$SEND_FS"
 SEND_SNAP="\$SEND_SNAP"
-OUTPUT_COMMAND_FORMAT="rclone rcat --drive-chunk-size ${DRIVE_CHUNK_SIZE} --low-level-retries 100 --retries 100 -vv "
+OUTPUT_COMMAND_FORMAT="rclone rcat \
+	--drive-chunk-size ${DRIVE_CHUNK_SIZE} \
+	--low-level-retries 100 --retries 100 -v"
 
 
 SEND_TO_DEFAULT_FORMAT='drive:/rclone/$(hostname -s)/${SEND_FS}/${SEND_SNAP}'".%06d.${COMPRESS_EXT}"
@@ -39,7 +43,9 @@ SEND_TO_DEFAULT_FORMAT='drive:/rclone/$(hostname -s)/${SEND_FS}/${SEND_SNAP}'".%
 
 SPLIT_SIZE=""
 
-
+token=
+bytes=
+OUT_FN=
 
 usage() {
 	echo "Usage: zstream-gdrive-split [-s <split_size>] [-h] dataset_name snapshot_name [send_to_format]"
@@ -73,6 +79,8 @@ SEND_SNAP=$1; shift
 SEND_TO_DEFAULT_FORMAT=$(eval echo "${SEND_TO_DEFAULT_FORMAT}")
 SEND_TO_FORMAT=${1:-$SEND_TO_DEFAULT_FORMAT}
 
+N=0
+
 if [[ -z "$SEND_FS" ]] || [[ -z "$SEND_SNAP" ]]; then
 	echo "Invalid number of arguments" 1>&2
 	usage 1>&2
@@ -87,15 +95,31 @@ fi
 if [[ "$SEND_TO_DEFAULT_FORMAT" != "$SEND_TO_FORMAT" ]]; then
 	echo "Using custom format: '$SEND_TO_FORMAT'"
 fi
-echo "$SEND_TO_FORMAT"
+#echo "$SEND_TO_FORMAT"
+
+
+token_temp="$TEMP_DIR/${SEND_SNAP}${token_ext}"
+
+get_token_list() {
+	rclone copy "$(dirname ${SEND_TO_FORMAT})/${SEND_SNAP}${token_ext}" "$TEMP_DIR/"
+#	echo "$token_temp"
+}
+
+put_token_list() {
+	rclone copy "$token_temp"  "$(dirname ${SEND_TO_FORMAT})"
+}
 
 
 get_bytes() {
-    sed -nr 's/^bytes:\s+(.*)$/\1/p' "$TMPFILE"
+    sed -nr 's/^bytes:\s+(.*)$/\1/p' "$TMPFILE" | \
+    	head -n1 | \
+    	tr -d '\n'
 }
 
 get_token() {
-    sed -nr 's/^receive_resume_token:\s+(.*)$/\1/p' "$TMPFILE"
+    sed -nr 's/^receive_resume_token:\s+(.*)$/\1/p' "$TMPFILE" | \
+    	head -n1 | \
+    	tr -d '\n'
 }
 
 process_tmpfile() {
@@ -108,37 +132,170 @@ process_tmpfile() {
 get_output_command() {
 	OUT_FN=$(printf "$SEND_TO_FORMAT" $1)
     OUTPUT_COMMAND="$OUTPUT_COMMAND_FORMAT $OUT_FN"
-    echo "Sending '$SEND_FS@$SEND_SNAP' -> $OUT_FN"
+#    clear
+    echo  "Sending '$SEND_FS@$SEND_SNAP' -> $OUT_FN"
+    printf "\n\n\n\n"
 }
 
-get_output_command 0
-${ZFS} send ${INITIAL_SEND_ARGS} ${SEND_FS}@${SEND_SNAP} | \
-    ( ${ZSTREAM_SPLIT}  -b${SPLIT_SIZE} 2>&4 ) | \
-    ${PRECOMP_BUFFER} | \
-    ${COMPRESS} | \
-    ${POSTCOMP_PREMBUF} | \
-    ${POSTCOMP_MBUFFER} | \
-    ${POSTCOMP_BUFFER} | \
-    ${OUTPUT_COMMAND}
-err=${PIPESTATUS[1]}
-N=1
-while [ ${err} -eq 10 ]; do
+
+
+append_token() {
+	local _token=$1
+	local _number=$2
+	local _filename=$3
+	local _size=$4
+	local _compsize=$5
+	local _totalsize=$6
+	printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+		${_number} \
+		${_token} \
+		${_filename} \
+		${_size} \
+		${_compsize} \
+		${_totalsize} >> "$token_temp"
+}
+
+check_zfs_code() {
+	local _code=$1
+	local _errlog=$2
+	if [[ ${_code} -eq 255 ]]; then
+		if ! grep -q ': signal received$' "$_errlog"; then
+			cat "$_errlog" >&2
+			exit ${_code}
+		fi
+	elif [[ ${_code} -gt 1 ]] && [[ ${_code} -ne 141 ]]; then
+		cat "$_errlog" >&2
+		exit ${_code}
+	fi
+}
+
+initial_zfs_stream() {
+
+	local _zfs_err_log="$TEMP_DIR/zfs_error.log"
+	get_output_command 0
+	${ZFS} send ${INITIAL_SEND_ARGS} ${SEND_FS}@${SEND_SNAP} 2>"$_zfs_err_log" | \
+		( ${ZSTREAM_SPLIT}  -b${SPLIT_SIZE} 2>&4 ) | \
+		tee >(wc -c > "$TEMP_DIR/bytecount") | \
+		${PRECOMP_BUFFER} | \
+		${COMPRESS} | \
+		${POSTCOMP_PREMBUF} | \
+		${POSTCOMP_MBUFFER} | \
+		${POSTCOMP_BUFFER} | \
+		tee >(wc -c > "$TEMP_DIR/bytecountcomp") | \
+		${OUTPUT_COMMAND}
+	local _ps=("${PIPESTATUS[@]}")
+	check_zfs_code ${_ps[0]} ${_zfs_err_log}
+	local _err=${_ps[1]}
 	process_tmpfile
-    if [ ${bytes} -gt 0 ]; then
-        extra_args="-s $bytes"
-    fi
-    get_output_command ${N}
-    ${ZFS} send -et ${token} | \
+	rm -f "$token_temp"
+	if [[ ${_err} -ne 10 ]]; then
+		token='++++'
+		bytes=000
+	fi
+	append_token \
+		${token} \
+		0 \
+		"${OUT_FN}" \
+		$(cat "$TEMP_DIR/bytecount" | head -n1 | tr -d '\n') \
+		$(cat "$TEMP_DIR/bytecountcomp" | head -n1 | tr -d '\n') \
+		${bytes}
+	put_token_list
+	return ${_err}
+}
+
+continue_zfs_stream() {
+	local _token=$1
+	local _number=$2
+	local _zfs_err_log="$TEMP_DIR/zfs_error.log"
+	get_output_command ${_number}
+    ${ZFS} send -et ${_token} 2>"$_zfs_err_log"| \
         ( ${ZSTREAM_SPLIT}  -b${SPLIT_SIZE} 2>&4 ) | \
+		tee >(wc -c > "$TEMP_DIR/bytecount") | \
         ${PRECOMP_BUFFER} | \
         ${COMPRESS} | \
         ${POSTCOMP_PREMBUF} | \
         ${POSTCOMP_MBUFFER} | \
         ${POSTCOMP_BUFFER} | \
+		tee >(wc -c > "$TEMP_DIR/bytecountcomp") | \
         ${OUTPUT_COMMAND}
-    err=${PIPESTATUS[1]}
+	local _ps=("${PIPESTATUS[@]}")
+
+	check_zfs_code ${_ps[0]} ${_zfs_err_log}
+	local _err=${_ps[1]}
+    if [[ ${_err} -ne 10 ]]; then
+		token='++++'
+		bytes=000
+	fi
+    process_tmpfile
+    get_token_list
+	append_token \
+		${token} \
+		${_number} \
+		"${OUT_FN}" \
+		$(cat "$TEMP_DIR/bytecount" | head -n1 | tr -d '\n') \
+		$(cat "$TEMP_DIR/bytecountcomp" | head -n1 | tr -d '\n') \
+		${bytes}
+	put_token_list
+	return ${_err}
+}
+
+
+parse_token_list() {
+	local _tokenlist="$(rclone cat \
+		$(dirname ${SEND_TO_FORMAT})/${SEND_SNAP}${token_ext} 2>/dev/null)"
+	if [[ $? -ne 0 ]]; then
+		return 1
+	fi
+	if ! (echo "$_tokenlist" | head -n1 | \
+			grep -qP  '^0\t[^\t]*\t[^\t]*\t[0-9]+\t[0-9]+\t[0-9]+$'); then
+		return 2
+	fi
+	last=$(echo "$_tokenlist" | tail -n 1 | \
+		grep -P  '^[0-9]+\t[^\t^+]*\t[^\t]*\t[0-9]+\t[0-9]+\t[0-9]+$')
+	if [[ $? -ne 0 ]]; then
+		return 4
+	fi
+	local _tailtoken=$(echo "${_tokenlist}" | tail -n1)
+	IFS=$'\t' read -r -a array <<< "$_tailtoken"
+	echo "${array[0]}..${array[1]}..${array[5]}"
+	N=$((${array[0]} + 1 ))
+	token=${array[1]}
+	bytes=${array[5]}
+	return 0
+}
+
+parse_token_list
+ret=$?
+case "$ret" in
+[1-2])
+	# no or bad token list, need to do initial stuff
+	echo "starting new transfer..." 1>&2
+	initial_zfs_stream; err=$?
+	N=1
+	;;
+4)
+	echo "Looks like we're done transferring already, no need to do anything"
+	exit 0
+	;;
+0)
+	echo "continuing transfer with piece $N and token $token" 1>&2
+	err=10
+	;;
+esac
+
+#echo $?
+#echo "$N::$token::$bytes"
+#exit
+
+#initial_zfs_stream; err=$?
+
+while [ ${err} -eq 10 ]; do
+	if [ ${bytes} -gt 0 ]; then
+        extra_args="-s $bytes"
+    fi
+    continue_zfs_stream ${token} ${N}; err=$?
     N=$(( N + 1 ))
 done
 
 exec 4>&-
-rm -rf ${TMPFILE}
+rm -rf ${TEMP_DIR}

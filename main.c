@@ -377,10 +377,10 @@ int main(int argc, char *argv[]) {
 
     filesplit:
 
-    fclose(stdout);
     free(buf);
     fletcher_4_fini();
 
+//    fclose(stdout);
     if (have_begun) {
         print_token();
         return (10);

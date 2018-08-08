@@ -5,32 +5,64 @@
 #
 # This software may be modified and distributed under the terms
 # of the MIT license.  See the LICENSE file for details.
-
+set -m
+echo $$
 ncpu=${NCPUS:-$(nproc)}
 ncpu=${ncpu:-"1"}
-ZFS="sudo zfs"
+ZFS="sudo -E zfs"
+#ZFS="zfs"
+rm stdout.log stderr.log 2>/dev/null
+# trap ctrl-c and call ctrl_c()
+#trap ctrl_c INT SIGINT SIGTTOU SIGTTIN SIGTERM SIGHUP EXIT SIGPIPE
+breaking=false
+rclonePID=
+trap_with_arg() {
+    func="$1" ; shift
+    for sig ; do
+        trap "$func $sig" "$sig"
+    done
+}
 
+func_trap() {
+        echo "** Trapped: $1"
+        breaking=true
+#        jobs -l
+        if [[ ! -z ${rclonePID} ]]; then
+#        	jobs -l
+#        	echo "$rclonePID"
+			echo "waiting for PID $rclonePID"
+        	wait ${rclonePID}
+		fi
+}
+trapall() {
+	trap_with_arg func_trap INT TERM
+}
 EXTRACT="7z e -si -so -txz -m0=lzma2 -mmt=$ncpu"
 COMPRESS_EXT="xz"
-PREBUFFER="pv -cterab -N Pre-Buffer"
+PREBUFFER="pv -terfabW -H 10 -w 80 -L $((200*1024)) -N Pre-Buffer"
 MBUFFER="mbuffer -m1G -q"
-POSTBUFFER="pv -cterab -N Post-Buffer"
-POSTEXTRACT="pv -cterab -N Post-Extract"
+POSTBUFFER="pv -terfabW  -H 10 -w 80 -N Post-Buffer"
+POSTEXTRACT="pv -terfabW  -H 10 -w 80 -N Post-Extract"
 
+token_ext='.tokenlist.tsv'
 SEND_TO_DEFAULT_FORMAT='drive:/rclone/$(hostname -s)/${SEND_FS}/${SEND_SNAP}'".%06d.${COMPRESS_EXT}"
 usage() {
 	echo "Usage: zstream-gdrive-retrieve [-h] drive_path receiving_dataset [send_to_format]"
 	echo "  -h                -- this help"
+	echo "  -y				  -- default yes to all"
 	echo "  drive_path        -- the name of the dataset to transfer"
 	echo "  receiving_dataset -- dataset to receive stream into"
 }
+default_yes=false
 
-
-while getopts ":h:" opt; do
+while getopts ":h:y" opt; do
 	case ${opt} in
 		h )
 			usage
 			exit 0
+			;;
+		y )
+			default_yes=true
 			;;
 		\? )
 			echo "Invalid Option: -$OPTARG" 1>&2
@@ -58,17 +90,115 @@ fi
 BASEDIR="$(dirname ${DRIVE_PATH})"
 SNAP_NAME="$(basename ${DRIVE_PATH})"
 JQ_MATCHER='.[]|select(.IsDir == false)|select(.Name |test("^'"$SNAP_NAME"'.*'"$COMPRESS_EXT"'$")) | .Name'
+
+
+token=$(zfs list -H -o receive_resume_token ${RECEIVE_ZFS} 2>/dev/null)
+
+file_num=0
+if [[ -z "$token" ]]; then
+	echo "Receiving new filesystem $RECEIVE_ZFS" >&2
+elif [[ "$token" == '-' ]]; then
+	if ! ${default_yes}; then
+		read -r -p "Filesystem already exists, continue? [y/N] " response
+
+		case "$response" in
+			[yY][eE][sS]|[yY])
+				echo "Continuing..." >&2
+				;;
+			*)
+				echo "Stopping" >&2
+				exit 1
+				;;
+		esac
+	else
+		echo "Filesystem already exists, default continuing..." >&2
+	fi
+else
+	echo "Continuing with token: $token" >&2
+#	token="$token XXXX"
+	tokenlist=$(rclone cat "${BASEDIR}/${SNAP_NAME}${token_ext}" | grep "$token")
+#	echo "$tokenlist"
+	if [[ -z "$tokenlist" ]]; then
+		echo "token not found in tokenlist" >&2
+		exit 2
+	fi
+	file_num=$(echo "$tokenlist" | cut -f1 -d$'\t')
+	file_num=$(( file_num + 1 ))
+#	echo "$file_num"
+fi
+
+
 FILES=$(rclone lsjson ${BASEDIR} | \
-	jq -r "$JQ_MATCHER" )
+	jq -r "$JQ_MATCHER" | sort )
+if [[ -z "$FILES" ]]; then
+	echo "Files not found in google drive for $BASEDIR" >&2
+	exit 12
+fi
+echo "$FILES"
+#exit
+n=0
+
+rclone_help() {
+#	trapall
+#	jobs -l
+	trap - INT
+	rclone cat "${BASEDIR}/${FILE}"   | \
+		${PREBUFFER}  | \
+ #		${MBUFFER}  | \
+ #		${POSTBUFFER}|\
+		${EXTRACT} | \
+ #		${POSTEXTRACT} | \
+		${ZFS} receive -Fsu "$RECEIVE_ZFS"
+	trapall
+}
 
 for FILE in ${FILES}; do
+	if ${breaking}; then
+		echo "breaking" >&2
+		exit 1;
+	fi
+	if [[ ${file_num} -gt ${n} ]]; then
+		n=$(( n + 1 ))
+		continue
+	fi
+	n=$(( n + 1 ))
 	echo "Receiving ${BASEDIR}/${FILE}..."
-	rclone cat -v "${BASEDIR}/${FILE}" | \
-		${PREBUFFER} | \
+	printf "\n"
+#	break
+	grepthing='sig'
+#	bash -ic "rclone_help" &
+	trap - INT
+	export BASEDIR FILE PREBUFFER EXTRACT ZFS RECEIVE_ZFS \
+		MBUFFER POSTBUFFER POSTEXTRACT
+	bash -c 'rclone cat "${BASEDIR}/${FILE}"   | \
+		${PREBUFFER}  | \
 		${MBUFFER} | \
-		${POSTBUFFER} |\
+		${POSTBUFFER} | \
 		${EXTRACT} | \
 		${POSTEXTRACT} | \
-		${ZFS} receive -Fsuv "$RECEIVE_ZFS"
+		${ZFS} receive -Fsu "$RECEIVE_ZFS"; echo ${PIPELINE[@]}  ' 2> >(tee /dev/null >&2) &
+	rclonePID=$(jobs -p)
+	trapall
+#	echo "::$rclonePID"
+#	echo $$
+#	jobs -l
+
+#	trap ctrl_c INT SIGINT SIGTTOU SIGTTIN SIGTERM SIGHUP EXIT SIGPIPE
+#	(rclone cat "${BASEDIR}/${FILE}"   | \
+#		${PREBUFFER}  | \
+# #		${MBUFFER}  | \
+# #		${POSTBUFFER}|\
+#		${EXTRACT} | \
+# #		${POSTEXTRACT} | \
+#		${ZFS} receive -Fsu "$RECEIVE_ZFS"
+#	rclonePID="$! $(jobs -p)"
+#	rclonePID=$(jobs -l |sed -nr 's|^(\[[0-9]+\]\+)?\s+([0-9]+) .*$|\2|p')
+#	echo $rclonePID
+#	echo $jobPID
+#	echo
+#	echo
+
+	wait ${rclonePID}
+#	exit
+	rclonePID=
 done
-#rclone lsjson drive:/rclone/mercury/rpool/var/log |jq -r '.[]|select(.IsDir == false)|.Name'
